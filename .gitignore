@@ -5,3 +5,4 @@ data/raw/
 data/processed/
 *.parquet
 .DS_Store
+.logs
