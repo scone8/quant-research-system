@@ -1,0 +1,10 @@
+2026-02-11 19:07:29,596 - INFO - Starting ML training...
+2026-02-11 19:07:34,303 - INFO - Loaded 363439 rows for ML training.
+2026-02-11 19:07:34,440 - INFO - Fold 1 - Accuracy: 0.507, ROC AUC: 0.504
+2026-02-11 19:07:34,634 - INFO - Fold 2 - Accuracy: 0.515, ROC AUC: 0.511
+2026-02-11 19:07:34,916 - INFO - Fold 3 - Accuracy: 0.522, ROC AUC: 0.509
+2026-02-11 19:07:35,274 - INFO - Fold 4 - Accuracy: 0.518, ROC AUC: 0.510
+2026-02-11 19:07:35,723 - INFO - Fold 5 - Accuracy: 0.509, ROC AUC: 0.504
+2026-02-11 19:07:36,250 - INFO - Final model saved to ../../models/xgb_momentum_model.joblib
+2026-02-11 19:07:36,358 - INFO - Predicted signals saved to ../../data/processed/ml_signals/predicted_signals.parquet
+2026-02-11 19:07:36,358 - INFO - ML training complete!
