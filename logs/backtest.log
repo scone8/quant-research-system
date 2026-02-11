@@ -1,0 +1,6 @@
+2026-02-11 18:47:39,751 - INFO - Starting backtest...
+2026-02-11 18:47:43,636 - INFO - Loaded features for 92 tickers.
+2026-02-11 18:47:43,829 - INFO - CAGR: 273.49%
+2026-02-11 18:47:43,829 - INFO - Sharpe Ratio: 6.75
+2026-02-11 18:47:43,829 - INFO - Max Drawdown: -9.71%
+2026-02-11 18:50:03,056 - INFO - Backtest complete!
