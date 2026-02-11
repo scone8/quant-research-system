@@ -1,0 +1,9 @@
+pandas
+numpy
+yfinance
+pyarrow
+boto3
+scikit-learn
+xgboost
+matplotlib
+tqdm
