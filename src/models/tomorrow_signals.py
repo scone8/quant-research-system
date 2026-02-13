@@ -1,36 +1,54 @@
-import pandas as pd
-import joblib
 import os
 
-# Load ML model
-model = joblib.load("../../models/xgb_momentum_model.joblib")
+from relative_strength_strategy import StrategyConfig, compute_signals, load_all_features
 
-# Load latest features for all tickers
-processed_dir = "../../data/processed"
-tickers = [d.split("=")[1] for d in os.listdir(processed_dir) if d.startswith("ticker=")]
-features_list = []
 
-for ticker in tickers:
-    ticker_dir = os.path.join(processed_dir, f"ticker={ticker}")
-    # Get latest year folder
-    year_folder = sorted(os.listdir(ticker_dir))[-1]
-    df = pd.read_parquet(os.path.join(ticker_dir, year_folder, "features.parquet"))
-    latest = df.sort_values("Date").iloc[-1].copy()
-    latest['Ticker'] = ticker
-    features_list.append(latest)
+PROCESSED_DIR = "../../data/processed"
+OUTPUT_DIR = "../../data/processed/strategy_signals"
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "tomorrow_signals.csv")
 
-latest_features = pd.DataFrame(features_list)
-feature_cols = ['Momentum_5','Momentum_20','Momentum_60','Vol_5','Vol_20','Vol_60','Vol_Z']
 
-# Predict probability of positive return tomorrow
-latest_features['ML_Prob'] = model.predict_proba(latest_features[feature_cols])[:,1]
+def main() -> None:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Generate binary signal (1=buy, 0=hold)
-latest_features['ML_Signal'] = (latest_features['ML_Prob'] > 0.5).astype(int)
+    data = load_all_features(PROCESSED_DIR)
+    if data.empty:
+        raise RuntimeError("No processed features found. Run data ingestion/feature scripts first.")
 
-# Save tomorrow's signals
-latest_features[['Ticker','ML_Prob','ML_Signal']].to_csv(
-    "../../data/processed/ml_signals/tomorrow_signals.csv", index=False
-)
+    config = StrategyConfig(
+        top_percentile=0.80,  # top 20%
+        sma_short=20,
+        sma_long=200,
+        breakout_window=20,
+        pullback_lookback=10,
+        hold_days=5,
+    )
 
-print(latest_features[['Ticker','ML_Prob','ML_Signal']])
+    signals, _ = compute_signals(data, config=config)
+    if signals.empty:
+        raise RuntimeError("Signal generation returned no rows.")
+
+    latest_date = signals["Date"].max()
+    latest = signals[(signals["Date"] == latest_date) & (signals["Ticker"] != "SPY")].copy()
+
+    out_cols = [
+        "Date",
+        "Ticker",
+        "Close",
+        "RS_Score",
+        "RS_Percentile",
+        "Eligible",
+        "Buy_Pullback",
+        "Exit_Pullback",
+        "Buy_Breakout",
+        "Exit_Breakout",
+    ]
+    latest = latest[out_cols].sort_values("Ticker")
+    latest.to_csv(OUTPUT_FILE, index=False)
+
+    print(f"Saved latest-day signals to {OUTPUT_FILE}")
+    print(latest.to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()

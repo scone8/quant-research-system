@@ -26,6 +26,8 @@ RAW_DIR = "../../data/raw"
 UNIVERSE_FILE = "../../data/universe/sp100.csv"
 LOG_DIR = "../../logs"
 os.makedirs(LOG_DIR, exist_ok=True)
+BENCHMARK_TICKERS = ["SPY"]
+ONLY_BENCHMARK = os.getenv("INGEST_ONLY_BENCHMARK", "0") == "1"
 
 USE_S3 = False
 S3_BUCKET = "your-bucket-name"
@@ -70,7 +72,11 @@ def upload_to_s3(local_path, s3_path):
 # -----------------------------
 try:
     tickers_df = pd.read_csv(UNIVERSE_FILE)
-    tickers = tickers_df['Ticker'].tolist()
+    universe_tickers = tickers_df['Ticker'].dropna().astype(str).str.upper().tolist()
+    if ONLY_BENCHMARK:
+        tickers = BENCHMARK_TICKERS.copy()
+    else:
+        tickers = list(dict.fromkeys(universe_tickers + BENCHMARK_TICKERS))
     logging.info(f"Loaded {len(tickers)} tickers from {UNIVERSE_FILE}")
 except Exception as e:
     logging.error(f"Failed to load tickers: {e}")

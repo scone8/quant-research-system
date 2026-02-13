@@ -1,134 +1,170 @@
 """
 train.py
 
-Train an ML model to predict next-day positive returns for S&P 100 tickers.
-Uses features computed in features.py.
+Builds and saves historical signals for:
+1) Relative Strength + Trend Filter + Pullback entry
+2) Relative Strength + Trend Filter + Breakout entry
 
-Model: XGBoost
-Output: predicted signals per ticker per day (1=buy, 0=hold)
+Also saves a comparison backtest chart.
 """
 
 import os
 import pandas as pd
-import numpy as np
-import joblib
-import logging
-from tqdm import tqdm
-from xgboost import XGBClassifier
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score, roc_auc_score
 
-# -----------------------------
-# CONFIGURATION
-# -----------------------------
+from relative_strength_strategy import (
+    StrategyConfig,
+    build_backtest_curves,
+    compute_metrics,
+    compute_signals,
+    load_all_features,
+    plot_curves,
+)
+
+
 PROCESSED_DIR = "../../data/processed"
-MODEL_DIR = "../../models"
+OUTPUT_DIR = "../../data/processed/strategy_signals"
 LOG_DIR = "../../logs"
 
-os.makedirs(MODEL_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
+SIGNALS_PARQUET = os.path.join(OUTPUT_DIR, "relative_strength_signals.parquet")
+SIGNALS_CSV = os.path.join(OUTPUT_DIR, "relative_strength_signals.csv")
+CURVES_CSV = os.path.join(OUTPUT_DIR, "relative_strength_backtest_curves.csv")
+CHART_PATH = os.path.join(LOG_DIR, "relative_strength_pullback_vs_breakout.png")
+BACKTEST_START = "2023-01-01"
+INITIAL_CAPITAL = 1000.0
 
-TARGET_COL = "Target"  # next day positive return
-FEATURE_COLS = [
-    'Momentum_5', 'Momentum_20', 'Momentum_60',
-    'Vol_5', 'Vol_20', 'Vol_60',
-    'Vol_Z'
-]
 
-# -----------------------------
-# SETUP LOGGING
-# -----------------------------
-logging.basicConfig(
-    filename=os.path.join(LOG_DIR, "train.log"),
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-console = logging.StreamHandler()
-console.setLevel(logging.INFO)
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-console.setFormatter(formatter)
-logging.getLogger("").addHandler(console)
-logging.info("Starting ML training...")
+def main() -> None:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
 
-# -----------------------------
-# LOAD FEATURES
-# -----------------------------
-tickers = [d.split("=")[1] for d in os.listdir(PROCESSED_DIR) if d.startswith("ticker=")]
-all_data = []
+    data = load_all_features(PROCESSED_DIR)
+    if data.empty:
+        raise RuntimeError("No processed features found. Run data ingestion/feature scripts first.")
 
-for ticker in tqdm(tickers, desc="Loading features"):
-    ticker_dir = os.path.join(PROCESSED_DIR, f"ticker={ticker}")
-    for year_folder in os.listdir(ticker_dir):
-        file_path = os.path.join(ticker_dir, year_folder, "features.parquet")
-        if os.path.exists(file_path):
-            df = pd.read_parquet(file_path)
-            df['Ticker'] = ticker
-            # Create target: next day positive return
-            df[TARGET_COL] = (df['Return'].shift(-1) > 0).astype(int)
-            df.dropna(subset=FEATURE_COLS + [TARGET_COL], inplace=True)
-            all_data.append(df)
-
-if not all_data:
-    logging.error("No data found. Exiting.")
-    exit()
-
-data = pd.concat(all_data).sort_values("Date")
-
-X = data[FEATURE_COLS]
-y = data[TARGET_COL]
-
-logging.info(f"Loaded {len(data)} rows for ML training.")
-
-# -----------------------------
-# TIME-SERIES SPLIT
-# -----------------------------
-tscv = TimeSeriesSplit(n_splits=5)
-fold = 1
-for train_index, test_index in tscv.split(X):
-    X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-    y_train, y_test = y.iloc[train_index], y.iloc[test_index]
-
-    model = XGBClassifier(
-        n_estimators=100,
-        max_depth=3,
-        learning_rate=0.1,
-        use_label_encoder=False,
-        eval_metric='logloss'
+    primary_config = StrategyConfig(
+        top_percentile=0.80,  # top 20%
+        sma_short=20,
+        sma_long=200,
+        breakout_window=20,
+        pullback_lookback=10,
+        hold_days=5,
     )
-    model.fit(X_train, y_train)
+    rethink_config = StrategyConfig(
+        top_percentile=0.90,  # stricter leaders
+        sma_short=20,
+        sma_long=200,
+        breakout_window=55,
+        pullback_lookback=7,
+        hold_days=5,
+    )
 
-    y_pred = model.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    auc = roc_auc_score(y_test, y_pred)
-    logging.info(f"Fold {fold} - Accuracy: {acc:.3f}, ROC AUC: {auc:.3f}")
-    fold += 1
+    signals, bench = compute_signals(data, config=primary_config)
+    if signals.empty:
+        raise RuntimeError("Primary signal generation returned no rows.")
 
-# -----------------------------
-# TRAIN FINAL MODEL ON ALL DATA
-# -----------------------------
-final_model = XGBClassifier(
-    n_estimators=100,
-    max_depth=3,
-    learning_rate=0.1,
-    use_label_encoder=False,
-    eval_metric='logloss'
-)
-final_model.fit(X, y)
+    export_cols = [
+        "Date",
+        "Ticker",
+        "Close",
+        "RS_Score",
+        "RS_Percentile",
+        "Eligible",
+        "Buy_Pullback",
+        "Exit_Pullback",
+        "Buy_Breakout",
+        "Exit_Breakout",
+        "Position_Pullback",
+        "Position_Breakout",
+    ]
+    curves = build_backtest_curves(
+        signals,
+        bench,
+        backtest_start=BACKTEST_START,
+        initial_capital=INITIAL_CAPITAL,
+    )
+    if curves.empty:
+        raise RuntimeError(f"No backtest rows found on/after {BACKTEST_START}.")
+    metrics = compute_metrics(curves)
+    benchmark_final = metrics["Benchmark"]["FinalCapital"]
+    benchmark_sharpe = metrics["Benchmark"]["Sharpe"]
+    primary_pass = (
+        (metrics["Pullback"]["FinalCapital"] > benchmark_final and metrics["Pullback"]["Sharpe"] > benchmark_sharpe)
+        or (metrics["Breakout"]["FinalCapital"] > benchmark_final and metrics["Breakout"]["Sharpe"] > benchmark_sharpe)
+    )
 
-# Save model
-model_path = os.path.join(MODEL_DIR, "xgb_momentum_model.joblib")
-joblib.dump(final_model, model_path)
-logging.info(f"Final model saved to {model_path}")
+    selected_label = "primary"
+    if not primary_pass:
+        print("Primary config did not beat benchmark on both final capital and Sharpe. Running rethink config...")
+        rethink_signals, rethink_bench = compute_signals(data, config=rethink_config)
+        rethink_curves = build_backtest_curves(
+            rethink_signals,
+            rethink_bench,
+            backtest_start=BACKTEST_START,
+            initial_capital=INITIAL_CAPITAL,
+        )
+        if not rethink_curves.empty:
+            rethink_metrics = compute_metrics(rethink_curves)
+            alt_benchmark_final = rethink_metrics["Benchmark"]["FinalCapital"]
+            alt_benchmark_sharpe = rethink_metrics["Benchmark"]["Sharpe"]
+            rethink_pass = (
+                (rethink_metrics["Pullback"]["FinalCapital"] > alt_benchmark_final and rethink_metrics["Pullback"]["Sharpe"] > alt_benchmark_sharpe)
+                or (rethink_metrics["Breakout"]["FinalCapital"] > alt_benchmark_final and rethink_metrics["Breakout"]["Sharpe"] > alt_benchmark_sharpe)
+            )
+            if rethink_pass:
+                signals = rethink_signals
+                bench = rethink_bench
+                curves = rethink_curves
+                metrics = rethink_metrics
+                selected_label = "rethink"
+            else:
+                # Keep whichever configuration had better best-strategy Sharpe.
+                primary_best_sharpe = max(metrics["Pullback"]["Sharpe"], metrics["Breakout"]["Sharpe"])
+                rethink_best_sharpe = max(rethink_metrics["Pullback"]["Sharpe"], rethink_metrics["Breakout"]["Sharpe"])
+                if rethink_best_sharpe > primary_best_sharpe:
+                    signals = rethink_signals
+                    bench = rethink_bench
+                    curves = rethink_curves
+                    metrics = rethink_metrics
+                    selected_label = "rethink_best_sharpe"
 
-# -----------------------------
-# GENERATE PREDICTION SIGNALS
-# -----------------------------
-data['ML_Signal'] = final_model.predict(X)
+    signals_to_save = signals[signals["Ticker"] != "SPY"][export_cols].sort_values(["Date", "Ticker"]).copy()
+    signals_to_save.to_parquet(SIGNALS_PARQUET, index=False)
+    signals_to_save.to_csv(SIGNALS_CSV, index=False)
 
-# Save signals to Parquet for engine.py
-signals_dir = os.path.join(PROCESSED_DIR, "ml_signals")
-os.makedirs(signals_dir, exist_ok=True)
-signals_path = os.path.join(signals_dir, "predicted_signals.parquet")
-data[['Date', 'Ticker', 'ML_Signal']].to_parquet(signals_path, index=False)
-logging.info(f"Predicted signals saved to {signals_path}")
-logging.info("ML training complete!")
+    curves.to_csv(CURVES_CSV, index=False)
+    plot_curves(
+        curves,
+        CHART_PATH,
+        initial_capital=INITIAL_CAPITAL,
+        backtest_start=BACKTEST_START,
+    )
+
+    last_date = pd.to_datetime(signals_to_save["Date"]).max().date()
+    bench_source = bench["Bench_Source"].dropna().iloc[-1] if "Bench_Source" in bench.columns else "Unknown"
+    print(f"Saved signals: {SIGNALS_PARQUET}")
+    print(f"Saved signals csv: {SIGNALS_CSV}")
+    print(f"Saved backtest curves: {CURVES_CSV}")
+    print(f"Saved chart: {CHART_PATH}")
+    print(f"Latest signal date: {last_date}")
+    print(f"Backtest start: {BACKTEST_START}")
+    print(f"Initial capital: ${INITIAL_CAPITAL:,.0f}")
+    print(f"Benchmark source: {bench_source}")
+    print(f"Config used: {selected_label}")
+    print(f"Final capital (Pullback): ${metrics['Pullback']['FinalCapital']:,.2f}")
+    print(f"Final capital (Breakout): ${metrics['Breakout']['FinalCapital']:,.2f}")
+    print(f"Final capital (Benchmark): ${metrics['Benchmark']['FinalCapital']:,.2f}")
+    print(f"Sharpe (Pullback): {metrics['Pullback']['Sharpe']:.3f}")
+    print(f"Sharpe (Breakout): {metrics['Breakout']['Sharpe']:.3f}")
+    print(f"Sharpe (Benchmark): {metrics['Benchmark']['Sharpe']:.3f}")
+    print(
+        "Pullback beats benchmark on both: "
+        f"{metrics['Pullback']['FinalCapital'] > metrics['Benchmark']['FinalCapital'] and metrics['Pullback']['Sharpe'] > metrics['Benchmark']['Sharpe']}"
+    )
+    print(
+        "Breakout beats benchmark on both: "
+        f"{metrics['Breakout']['FinalCapital'] > metrics['Benchmark']['FinalCapital'] and metrics['Breakout']['Sharpe'] > metrics['Benchmark']['Sharpe']}"
+    )
+
+
+if __name__ == "__main__":
+    main()
